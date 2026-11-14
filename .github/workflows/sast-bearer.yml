@@ -1,0 +1,59 @@
+# Workflow de integración continua que ejecuta el análisis SAST con Bearer CLI
+name: SAST Bearer CI  # Nombre visible de este workflow en la pestaña Actions de GitHub
+
+# Sección "on": define los eventos que disparan la ejecución del workflow
+on:
+  push:  # Primer disparador: cuando se hace push
+    branches: [main]  # Solo si el push es sobre la rama main
+  pull_request:  # Segundo disparador: cuando se abre o actualiza un pull request
+    branches: [main]  # Solo si el pull request apunta hacia la rama main
+  workflow_dispatch:  # Tercer disparador: permite correrlo manualmente desde la UI de Actions
+
+# Sección "permissions": aplica el principio de mínimo privilegio al GITHUB_TOKEN
+permissions:
+  contents: read  # Solo necesita leer el código del repositorio (para el checkout)
+  security-events: write  # Necesario para poder publicar hallazgos en Security > Code scanning
+
+# Sección "jobs": contiene los trabajos que ejecuta este workflow
+jobs:
+  bearer-scan:  # Identificador interno del único job de este workflow
+    name: Bearer SAST scan  # Nombre legible del job, visible en la UI de Actions
+    runs-on: ubuntu-latest  # El job corre sobre un runner Linux administrado por GitHub
+
+    steps:  # Lista ordenada de pasos que ejecuta el job
+
+      - name: Checkout del repositorio  # Paso 1: nombre descriptivo que aparece en la UI
+        uses: actions/checkout@v4  # Action oficial de GitHub para descargar el código del repo en el runner
+
+      - name: Instalar Bearer CLI  # Paso 2: instala la herramienta SAST en el runner (Linux nativo, sin WSL)
+        run: |  # Bloque de shell con varios comandos
+          curl -sfL https://raw.githubusercontent.com/Bearer/bearer/main/contrib/install.sh | sh  # Descarga el binario de Bearer en ./bin
+          sudo mv ./bin/bearer /usr/local/bin/bearer  # Lo mueve a una ruta del PATH disponible para todo el job
+          bearer version  # Imprime la versión instalada para dejar evidencia en el log
+
+      - name: Crear carpeta de reportes  # Paso 3: prepara el destino de los reportes generados
+        run: mkdir -p reportes  # Crea la carpeta "reportes" si todavía no existe en el runner
+
+      - name: Escanear y generar reporte SARIF  # Paso 4: corre Bearer sobre todo el repositorio en formato SARIF
+        id: bearer_sarif  # Identificador del paso, usado más abajo para leer su resultado
+        run: bearer scan . --format sarif --output reportes/reporte.sarif --exit-code 0  # Escanea todo "." y fuerza exit 0 para no frenar el job aquí mismo
+
+      - name: Escanear y generar reporte HTML  # Paso 5: corre Bearer sobre todo el repositorio en formato HTML
+        id: bearer_html  # Identificador del paso
+        run: bearer scan . --format html --output reportes/reporte.html --exit-code 0  # Mismo escaneo completo, en formato legible para humanos
+
+      - name: Subir SARIF a Security > Code scanning  # Paso 6: publica los hallazgos en la pestaña Security de GitHub
+        if: always()  # Se ejecuta siempre, aunque algún paso previo haya marcado error, para no perder evidencia
+        uses: github/codeql-action/upload-sarif@v3  # Action oficial de GitHub para ingerir archivos SARIF
+        with:  # Parámetros que recibe la action
+          sarif_file: reportes/reporte.sarif  # Ruta del archivo SARIF generado en el paso 4
+
+      - name: Subir reporte HTML como artefacto  # Paso 7: guarda el HTML como artefacto descargable de la corrida
+        if: always()  # Se ejecuta siempre, para conservar el reporte sin importar el resultado de otros pasos
+        uses: actions/upload-artifact@v4  # Action oficial para adjuntar archivos a la ejecución del workflow
+        with:  # Parámetros que recibe la action
+          name: bearer-html-report  # Nombre del artefacto, visible en la página de la ejecución
+          path: reportes/reporte.html  # Ruta del archivo que se adjunta como artefacto
+
+      - name: Aplicar gate de severidad (critical y high)  # Paso 8: decide si el pipeline debe marcarse como fallido
+        run: bearer scan . --severity critical,high --quiet  # Sin --exit-code: Bearer retorna código distinto de 0 si hay hallazgos critical/high, marcando el job como fallido y bloqueando visualmente el PR
