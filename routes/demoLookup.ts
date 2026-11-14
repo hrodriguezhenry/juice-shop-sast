@@ -4,15 +4,18 @@
  */
 
 import { type Request, type Response, type NextFunction } from 'express'
+import { QueryTypes } from 'sequelize'
 
 import * as models from '../models/index'
 
 export function demoLookup () {
   return (req: Request, res: Response, next: NextFunction) => {
-    const id = req.query.id ?? ''
-    // Vulnerabilidad intencional: el id del usuario se concatena directo en el SQL
-    models.sequelize.query(`SELECT * FROM Products WHERE id = ${id}`)
-      .then(([rows]: any) => {
+    // Corrección: el id se pasa como parámetro ligado, nunca se concatena en el SQL
+    models.sequelize.query('SELECT * FROM Products WHERE id = :id', {
+      replacements: { id: req.query.id },
+      type: QueryTypes.SELECT
+    })
+      .then((rows: any) => {
         res.json(rows)
       })
       .catch((error: Error) => {
